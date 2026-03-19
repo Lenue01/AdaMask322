@@ -12,9 +12,6 @@ Masked diffusion Language model
 
         After further research into the subject I learned about masked diffusion models.  This is my attempt to impliment a masked diffusion model
         
-
-        
-
 """
 
 #---------------Imports-----------------
@@ -49,6 +46,7 @@ class config:
     batch_size = 128
     lr = 1e-4
     weight_decay = 0.01
+    accum_steps = 1          # increase to 2/4 to simulate larger batch on limited VRAM
     device = "cuda" if torch.cuda.is_available() else "cpu"
 #----------------Config-------------------------
 
@@ -56,19 +54,24 @@ class config:
 
 #-------------------data-----------------------------
 def get_dataloader(tokenizer, config):
-    dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
+    dataset = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train")
     dataset = dataset.shuffle(seed=42)
 
     def tokenize(example):
-        enc = tokenizer(
-            example["text"],
-            truncation=True,
-            padding="max_length",
-            max_length=config.context_length,
-        )
-        return {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
+        ids = tokenizer(example["text"], add_special_tokens=False)["input_ids"]
+        # Chunk into non-overlapping windows instead of truncating
+        chunks, masks = [], []
+        for i in range(0, len(ids), config.context_length):
+            chunk = ids[i:i + config.context_length]
+            if len(chunk) < 16:
+                continue
+            pad_len = config.context_length - len(chunk)
+            chunks.append(chunk + [tokenizer.pad_token_id] * pad_len)
+            masks.append([1] * len(chunk) + [0] * pad_len)
+        return {"input_ids": chunks, "attention_mask": masks}
 
-    dataset = dataset.map(tokenize, num_proc=4, remove_columns=dataset.column_names)
+    dataset = dataset.map(tokenize, batched=False, num_proc=4,
+                          remove_columns=dataset.column_names)
     dataset = dataset.with_format("torch")
     return DataLoader(dataset, batch_size=config.batch_size, num_workers=4,
                       pin_memory=True, shuffle=True)
@@ -88,10 +91,6 @@ class MaskedDiffusion:
         a(T) = 100% chance
         '''
         alpha = ((torch.cos(math.pi/2 * t/self.steps))**2)
-        """
-        Divide by a[0] to normalize the timestamps
-        """
-        alpha = alpha/alpha[0]
         self.alpha = alpha.to(device)
 
     def mask_rate(self, t):
@@ -149,8 +148,8 @@ class TokenDifficulty(MaskedDiffusion):
         probs = F.softmax(logits[is_masked].float(), dim=-1)
         correct_probs = probs.gather(1, target.unsqueeze(1)).squeeze(1)  # P(correct token)
 
-        self.correct *= 0.99
-        self.total   *= 0.99
+        self.correct *= 0.999
+        self.total   *= 0.999
         self.total.scatter_add_(0, target, torch.ones_like(target, dtype=torch.float))
         self.correct.scatter_add_(0, target, correct_probs)
 
@@ -295,59 +294,70 @@ class MaskedDiffusionTransformer(nn.Module):
 @torch.no_grad()
 def sample(model, config, num_samples=4, temperature=1.0):
     """
-    Iterative confidence-based unmasking.
+    MaskGIT-style confidence-based iterative unmasking.
 
     Algorithm:
       1. Start with all tokens = [MASK]
-      2. At each step t (counting down from train_cap → 1):
-         a. Apply repetition penalty to logits for already-placed tokens
-         b. Sample token predictions from the distribution (multinomial)
-         c. Randomly select k masked positions to permanently unmask
+      2. At each step t (counting down from steps → 1):
+         a. Sample token predictions from the distribution
+         b. Compute confidence (max prob) for each masked position
+         c. Permanently unmask the top-k highest-confidence positions
       3. Return the fully unmasked sequence
 
-    Random unmasking order avoids the confidence feedback loop that
-    causes repetitive outputs in confidence-based (MaskGIT-style) sampling.
+    Placing the most confident tokens first gives the model reliable context
+    for the remaining masked positions, producing coherent sentences.
+    Temperature is annealed from high (diverse early guesses) to low
+    (confident final placements).
     """
     model.eval()
     device = config.device
+    L = config.context_length
 
-    # Start fully masked
-    x    = torch.full((num_samples, config.context_length), config.mask_token_ID, device=device)
-    mask = torch.ones(num_samples, config.context_length, dtype=torch.bool, device=device)
+    x    = torch.full((num_samples, L), config.mask_token_ID, device=device)
+    mask = torch.ones(num_samples, L, dtype=torch.bool, device=device)  # True = still masked
 
-    # How many tokens to unmask per step (evenly distributed)
-    max_t = int(config.steps * 0.65)
-    tokens_per_step = math.ceil(config.context_length / max_t)
+    num_steps = config.steps
 
+    for step in range(num_steps):
+        if mask.sum() == 0:
+            break
 
-    for step in range(max_t):
-        t_val = max(1, max_t - step)               # counts down from train cap → 1
-        t     = torch.full((num_samples,), t_val, device=device, dtype=torch.long)
+        t_val = max(1, num_steps - step)
+        t = torch.full((num_samples,), t_val, device=device, dtype=torch.long)
 
         logits = model(x, t)
 
-        # Apply repetition penalty: reduce prob of tokens already placed
-        logits_penalized = logits.clone()
-        for i in range(num_samples):
-            placed = x[i][~mask[i]].unique()                                      # unique placed tokens only
-            if placed.numel() > 0:
-                logits_penalized[i, :, placed] -= 1.5                             # flat penalty per token type
-        probs       = F.softmax(logits_penalized / temperature, dim=-1)           # [B, L, V]
-        pred_tokens = torch.multinomial(                                           # [B, L]
-            probs.view(-1, probs.size(-1)), 1
-        ).view(num_samples, -1)
+        # Anneal temperature: diverse early on, sharp near the end
+        step_temp = temperature * (0.5 + 0.5 * t_val / num_steps)
+        probs = F.softmax(logits / step_temp, dim=-1)          # [B, L, V]
 
-        if mask.sum() == 0:
-            break
+        # Sample a candidate token at every position
+        pred_tokens = torch.multinomial(
+            probs.view(-1, config.vocab_size), 1
+        ).view(num_samples, L)                                  # [B, L]
+
+        # Confidence = max prob; mask out already-placed positions from selection
+        confidence = probs.max(dim=-1).values                  # [B, L]
+        confidence[~mask] = -1.0
+
+        # Unmask ceil(remaining / steps_left) tokens per sample this step
+        remaining  = mask.sum(dim=1).float()                   # [B]
+        steps_left = max(1, num_steps - step)
+        k_per_sample = torch.ceil(remaining / steps_left).long()
 
         for i in range(num_samples):
             masked_pos = mask[i].nonzero(as_tuple=True)[0]
             if masked_pos.numel() == 0:
                 continue
-            k_i = min(tokens_per_step, masked_pos.numel())
-            chosen = masked_pos[torch.randperm(masked_pos.numel(), device=device)[:k_i]]
+            k_i = min(k_per_sample[i].item(), masked_pos.numel())
+
+            # Pick the k_i most confident masked positions
+            conf_masked = confidence[i][masked_pos]
+            _, top_local = conf_masked.topk(k_i)
+            chosen = masked_pos[top_local]
+
             x[i].scatter_(0, chosen, pred_tokens[i].gather(0, chosen))
-            mask[i].scatter_(0, chosen, torch.zeros(k_i, dtype=torch.bool, device=device))
+            mask[i][chosen] = False
 
     return x
 
@@ -381,7 +391,7 @@ def print_token_stats(diffusion, tokenizer, k=10):
         print(f"    {tok!r:20s}  acc={acc:.3f}")
 
 
-def get_lr(global_step, warmup_steps=2000, max_lr=config.lr, min_lr=config.lr/10, total_steps=1000000):
+def get_lr(global_step, warmup_steps=8000, max_lr=config.lr, min_lr=config.lr/10, total_steps=800000):
     if global_step < warmup_steps:
         return max_lr * global_step / warmup_steps
     progress = (global_step - warmup_steps) / (total_steps - warmup_steps)
@@ -394,13 +404,13 @@ def train(model, diffusion, dataloader, config, tokenizer):
     )
 
     use_amp = config.device == "cuda"
-    scaler  = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler  = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     STEPS_PER_EPOCH = 8000
     ACCUM_STEPS     = 1
     data_iter       = iter(dataloader)
 
-    for epoch in range(100):
+    for epoch in range(50):
         model.train()
         running_loss = 0.0
         loop = tqdm(range(STEPS_PER_EPOCH), desc=f"Epoch {epoch}")
@@ -428,7 +438,7 @@ def train(model, diffusion, dataloader, config, tokenizer):
             #decide either to do random masking or difficulty masking
             split = torch.randint(0, 10, (1,)).item()
 
-            t = torch.randint(1, int(config.steps * 0.65) + 1, (tokens.size(0),), device=config.device)
+            t = torch.randint(1, config.steps + 1, (tokens.size(0),), device=config.device)
             device_type = "cuda" if config.device == "cuda" else "cpu"
 
             if split < 7:
@@ -436,7 +446,7 @@ def train(model, diffusion, dataloader, config, tokenizer):
             else:
                 x_t, is_masked = diffusion.difficulty_corrupt(tokens, t)
 
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=use_amp):
+            with torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=use_amp):
                 logits = model(x_t, t, key_padding_mask=pad_mask)
 
                 # Compute CE loss only on masked positions (ignore padding + unmasked)
@@ -446,7 +456,7 @@ def train(model, diffusion, dataloader, config, tokenizer):
                 loss = F.cross_entropy(
                     logits[loss_mask],                         # [N_masked, V]
                     tokens[loss_mask],                         # [N_masked]
-                    label_smoothing=0.1,
+                    label_smoothing=0.05,
                 ) / ACCUM_STEPS
 
             scaler.scale(loss).backward()
@@ -462,7 +472,7 @@ def train(model, diffusion, dataloader, config, tokenizer):
             loop.set_postfix(loss=f"{running_loss / (step + 1):.4f}") 
 
 
-        if epoch % 5 == 0 or epoch == 99:
+        if epoch % 2 == 0 or epoch == 99:
             torch.save(model.state_dict(), f"masked_diffusion_epoch_{epoch}.pt")
             print(f"\n--- Epoch {epoch} Token Difficulty ---")
             print_token_stats(diffusion, tokenizer)
