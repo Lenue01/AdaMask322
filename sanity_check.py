@@ -21,7 +21,7 @@ from adamask.train import train
 
 def main():
     config = Config(
-        dataset_name="wikitext",
+        dataset_name="Salesforce/wikitext",
         dataset_config="wikitext-2-raw-v1",
         split="train",
         context_length=64,
