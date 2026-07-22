@@ -16,6 +16,14 @@ def parse_args():
     parser.add_argument("--dataset-config", default="sample-10BT")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--context-length", type=int, default=128)
+    parser.add_argument("--hidden-size", type=int, default=1024)
+    parser.add_argument("--heads", type=int, default=16)
+    parser.add_argument("--layers", type=int, default=16)
+    parser.add_argument("--steps", type=int, default=64)
+    parser.add_argument("--num-epochs", type=int, default=50)
+    parser.add_argument("--steps-per-epoch", type=int, default=8000)
+    parser.add_argument("--warmup-steps", type=int, default=8000)
+    parser.add_argument("--save-every-epochs", type=int, default=2)
     parser.add_argument("--device", default=None)
     return parser.parse_args()
 
@@ -28,6 +36,14 @@ def main():
         dataset_config=args.dataset_config,
         batch_size=args.batch_size,
         context_length=args.context_length,
+        hidden_size=args.hidden_size,
+        heads=args.heads,
+        layers=args.layers,
+        steps=args.steps,
+        num_epochs=args.num_epochs,
+        steps_per_epoch=args.steps_per_epoch,
+        warmup_steps=args.warmup_steps,
+        save_every_epochs=args.save_every_epochs,
     )
     if args.device:
         config.device = torch.device(args.device)
