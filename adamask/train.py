@@ -46,7 +46,33 @@ def print_token_stats(diffusion, tokenizer, k=10):
         print(f"    {tok!r:20s}  acc={acc:.3f}")
 
 
-def train(model, diffusion, dataloader, config):
+def save_checkpoint(model, optimizer, scaler, diffusion, epoch, path):
+    """Save full training state so a run can be resumed after a crash or disconnect."""
+    torch.save({
+        "epoch": epoch,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict(),
+        "diffusion_total": diffusion.total,
+        "diffusion_correct": diffusion.correct,
+    }, path)
+
+
+def load_checkpoint(path, model, optimizer, scaler, diffusion, device):
+    """Restore model, optimizer, scaler, and token-difficulty state from a checkpoint.
+
+    Returns the epoch to resume from (the one after the last completed epoch).
+    """
+    ckpt = torch.load(path, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    scaler.load_state_dict(ckpt["scaler"])
+    diffusion.total = ckpt["diffusion_total"].to(device)
+    diffusion.correct = ckpt["diffusion_correct"].to(device)
+    return ckpt["epoch"] + 1
+
+
+def train(model, diffusion, dataloader, config, resume_path=None):
     """Train the model with diffusion masking and partial reveal simulation."""
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=0.0, weight_decay=config.weight_decay
@@ -55,7 +81,12 @@ def train(model, diffusion, dataloader, config):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     data_iter = iter(dataloader)
 
-    for epoch in range(config.num_epochs):
+    start_epoch = 0
+    if resume_path:
+        start_epoch = load_checkpoint(resume_path, model, optimizer, scaler, diffusion, config.device)
+        print(f"Resumed from {resume_path}, continuing at epoch {start_epoch}")
+
+    for epoch in range(start_epoch, config.num_epochs):
         model.train()
         running_loss = 0.0
         loop = tqdm(range(config.steps_per_epoch), desc=f"Epoch {epoch}")
@@ -130,7 +161,7 @@ def train(model, diffusion, dataloader, config):
 
         # Save model and print statistics periodically.
         if epoch % config.save_every_epochs == 0 or epoch == config.num_epochs - 1:
-            torch.save(model.state_dict(), f"masked_diffusion_epoch_{epoch}.pt")
+            save_checkpoint(model, optimizer, scaler, diffusion, epoch, f"masked_diffusion_epoch_{epoch}.pt")
             print(f"\n--- Epoch {epoch} Token Difficulty ---")
             print_token_stats(diffusion, config.tokenizer)
         print()
