@@ -11,6 +11,9 @@ fragments from wikitext-2 rather than novel fluent prose. That is fine -
 the goal here is a pipeline sanity check, not a quality benchmark.
 """
 
+import argparse
+import torch
+
 from adamask.config import Config
 from adamask.data import get_dataloader
 from adamask.diffusion import TokenDifficulty
@@ -19,23 +22,49 @@ from adamask.sample import sample
 from adamask.train import train
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="AdaMask sanity check (small-scale run)")
+    parser.add_argument("--dataset-name", default="Salesforce/wikitext")
+    parser.add_argument("--dataset-config", default="wikitext-2-raw-v1")
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--context-length", type=int, default=128)
+    parser.add_argument("--hidden-size", type=int, default=256)
+    parser.add_argument("--heads", type=int, default=8)
+    parser.add_argument("--layers", type=int, default=8)
+    parser.add_argument("--steps", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-epochs", type=int, default=10)
+    parser.add_argument("--steps-per-epoch", type=int, default=1500)
+    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--save-every-epochs", type=int, default=1)
+    parser.add_argument("--max-workers", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=None, help="Default: auto-scaled from --hidden-size")
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--resume", default=None, help="Path to a checkpoint to resume training from")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     config = Config(
-        dataset_name="Salesforce/wikitext",
-        dataset_config="wikitext-2-raw-v1",
-        split="train",
-        context_length=128,
-        hidden_size=256,
-        heads=8,
-        layers=8,
-        steps=32,
-        batch_size=32,
-        num_epochs=10,
-        steps_per_epoch=1500,
-        warmup_steps=100,
-        save_every_epochs=1,
-        max_workers=2,
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        split=args.split,
+        context_length=args.context_length,
+        hidden_size=args.hidden_size,
+        heads=args.heads,
+        layers=args.layers,
+        steps=args.steps,
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        steps_per_epoch=args.steps_per_epoch,
+        warmup_steps=args.warmup_steps,
+        save_every_epochs=args.save_every_epochs,
+        max_workers=args.max_workers,
+        lr=args.lr,
     )
+    if args.device:
+        config.device = torch.device(args.device)
 
     dataloader = get_dataloader(config)
     model = MaskedDiffusionTransformer(config).to(config.device)
@@ -43,7 +72,7 @@ def main():
         config.vocab_size, config.mask_token_id, config.pad_token_id, config.steps, config.device
     )
 
-    train(model, diffusion, dataloader, config)
+    train(model, diffusion, dataloader, config, resume_path=args.resume)
 
     print("\n=== Sanity check samples ===")
     tokens = sample(model, config, num_samples=4, temperature=0.9)
