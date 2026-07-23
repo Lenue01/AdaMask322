@@ -38,11 +38,20 @@ def _tokenize_batch(examples, tokenizer, config):
 
 
 def get_dataloader(config):
-    """Build a PyTorch DataLoader from the dataset configuration."""
-    dataset = load_dataset(config.dataset_name, name=config.dataset_config, split=config.split)
+    """Build a PyTorch DataLoader from the dataset configuration.
 
-    # Shuffle the raw dataset before tokenization for randomness.
-    dataset = dataset.shuffle(seed=42)
+    Uses streaming so tokenization happens lazily per-batch during training
+    instead of eagerly over the entire dataset up front -- for a dataset the
+    size of fineweb-edu's 10BT sample, eager tokenization can take many hours
+    before a single training step runs.
+    """
+    dataset = load_dataset(
+        config.dataset_name, name=config.dataset_config, split=config.split, streaming=True
+    )
+
+    # Streaming can't shuffle by index, so it shuffles a rolling buffer instead.
+    # This is an approximate shuffle, not a full random permutation of the dataset.
+    dataset = dataset.shuffle(seed=42, buffer_size=10_000)
 
     # Tokenize in batches so each document's chunks become independent rows.
     dataset = dataset.map(
@@ -54,10 +63,11 @@ def get_dataloader(config):
     # Convert dataset examples to PyTorch tensors.
     dataset = dataset.with_format("torch")
 
+    # IterableDataset handles its own shuffling/sharding, so shuffle=True and a
+    # Sampler aren't valid here the way they are for a map-style dataset.
     return DataLoader(
         dataset,
         batch_size=config.batch_size,
         num_workers=config.max_workers,
         pin_memory=True,
-        shuffle=True,
     )
