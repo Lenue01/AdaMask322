@@ -7,8 +7,9 @@ import torch
 from transformers import AutoTokenizer
 
 # Reference point the auto-scaling heuristics below are anchored to: the
-# hidden_size/lr pair that main.py's full-scale config was tuned around.
+# hidden_size/layers/lr triple that main.py's full-scale config was tuned around.
 _REFERENCE_HIDDEN_SIZE = 1024
+_REFERENCE_LAYERS = 16
 _REFERENCE_LR = 1e-4
 
 
@@ -39,6 +40,7 @@ class Config:
     steps_per_epoch: int = 8000
     total_steps: int = field(init=False)
     max_workers: int = 4
+    difficulty_loss_scale: float = 0.3  # weight = 1 + scale * difficulty, per masked token
 
     # Device and tokenizer fields initialized after construction.
     device: torch.device = field(default_factory=lambda: torch.device("cuda" if torch.cuda.is_available() else "cpu"))
@@ -62,8 +64,15 @@ class Config:
         if self.warmup_steps is None:
             self.warmup_steps = max(1, round(0.05 * self.total_steps))
 
-        # Wider models need a smaller peak LR to stay stable; this heuristic scales
-        # LR ~ 1/sqrt(hidden_size), anchored at the tuned 1024-wide/1e-4 default, so
-        # changing --hidden-size doesn't silently leave an unsuitable LR in place.
+        # Wider and deeper models both need a smaller peak LR to stay stable: width
+        # scaling follows LR ~ 1/sqrt(hidden_size), and depth scaling follows
+        # LR ~ 1/sqrt(layers), since each added residual block compounds the
+        # variance growth of the residual stream. Both are anchored at the tuned
+        # 1024-wide/16-layer/1e-4 default, so changing --hidden-size or --layers
+        # doesn't silently leave an unsuitable LR in place.
         if self.lr is None:
-            self.lr = _REFERENCE_LR * math.sqrt(_REFERENCE_HIDDEN_SIZE / self.hidden_size)
+            self.lr = (
+                _REFERENCE_LR
+                * math.sqrt(_REFERENCE_HIDDEN_SIZE / self.hidden_size)
+                * math.sqrt(_REFERENCE_LAYERS / self.layers)
+            )

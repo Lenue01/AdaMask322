@@ -113,13 +113,8 @@ def train(model, diffusion, dataloader, config, resume_path=None):
             if step % config.accum_steps == 0:
                 optimizer.zero_grad(set_to_none=True)
 
-            # Randomly choose whether to use random masking or difficulty-based masking.
-            split = torch.randint(0, 10, (1,)).item()
             t = torch.randint(1, config.steps + 1, (tokens.size(0),), device=config.device)
-            if split < 7:
-                x_t, is_masked = diffusion.corrupt(tokens, t)
-            else:
-                x_t, is_masked = diffusion.difficulty_corrupt(tokens, t)
+            x_t, is_masked = diffusion.corrupt(tokens, t)
 
             # Reveal some masked tokens to simulate a partially decoded sequence state.
             x_t, train_mask = apply_partial_reveal(x_t, tokens, is_masked, reveal_prob=0.5)
@@ -130,11 +125,20 @@ def train(model, diffusion, dataloader, config, resume_path=None):
                 # Compute loss only on tokens that are still masked and not padding.
                 loss_mask = (train_mask & ~pad_mask).bool()
                 if loss_mask.any():
-                    loss = F.cross_entropy(
+                    target = tokens[loss_mask]
+                    # Weight each masked token's loss by how hard it has historically
+                    # been for the model, instead of masking hard tokens more often --
+                    # this pushes gradient signal toward hard tokens without changing
+                    # what the model sees as input.
+                    difficulty = diffusion.get_difficulty(target)
+                    weight = 1.0 + config.difficulty_loss_scale * difficulty
+                    per_token_loss = F.cross_entropy(
                         logits[loss_mask],
-                        tokens[loss_mask],
+                        target,
                         label_smoothing=0.05,
-                    ) / config.accum_steps
+                        reduction="none",
+                    )
+                    loss = (per_token_loss * weight).mean() / config.accum_steps
                 else:
                     loss = None
 

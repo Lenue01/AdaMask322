@@ -1,4 +1,4 @@
-"""Masked diffusion and adaptive difficulty masking logic."""
+"""Masked diffusion and adaptive difficulty loss-weighting logic."""
 
 import math
 import torch
@@ -35,7 +35,7 @@ class MaskedDiffusion:
 
 
 class TokenDifficulty(MaskedDiffusion):
-    """Tracks token difficulty and biases masking toward harder tokens."""
+    """Tracks per-token difficulty so the training loss can be weighted toward harder tokens."""
 
     def __init__(self, vocab_size, masked_token_id, pad_token_id, steps, device):
         super().__init__(steps, masked_token_id, pad_token_id, device)
@@ -62,14 +62,3 @@ class TokenDifficulty(MaskedDiffusion):
     def get_difficulty(self, tokens):
         """Return a difficulty score for each token in the input."""
         return 1.0 - (self.correct[tokens] / (self.total[tokens] + 1e-8))
-
-    def difficulty_corrupt(self, tokens, t):
-        """Mask easier tokens less often and harder tokens more often."""
-        rate = self.mask_rate(t).view(-1, 1)
-        difficulty = self.get_difficulty(tokens)
-        noise = torch.rand(tokens.shape, device=tokens.device)
-        biased = noise * (1.0 - 0.3 * difficulty)
-        is_masked = (biased < rate) & (tokens != self.pad_token_id)
-        x_t = tokens.clone()
-        x_t[is_masked] = self.masked_token_id
-        return x_t, is_masked

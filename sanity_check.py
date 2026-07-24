@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--save-every-epochs", type=int, default=1)
     parser.add_argument("--max-workers", type=int, default=2)
+    parser.add_argument("--difficulty-loss-scale", type=float, default=0.3, help="Loss weight = 1 + scale * difficulty for hard tokens")
     parser.add_argument("--lr", type=float, default=None, help="Default: auto-scaled from --hidden-size")
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", default=None, help="Path to a checkpoint to resume training from")
@@ -61,6 +62,7 @@ def main():
         warmup_steps=args.warmup_steps,
         save_every_epochs=args.save_every_epochs,
         max_workers=args.max_workers,
+        difficulty_loss_scale=args.difficulty_loss_scale,
         lr=args.lr,
     )
     if args.device:
