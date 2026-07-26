@@ -25,6 +25,10 @@ def parse_args():
     parser.add_argument("--warmup-steps", type=int, default=None, help="Default: 5%% of total steps")
     parser.add_argument("--save-every-epochs", type=int, default=2)
     parser.add_argument("--difficulty-loss-scale", type=float, default=0.3, help="Loss weight = 1 + scale * difficulty for hard tokens")
+    parser.add_argument("--difficulty-decay", type=float, default=0.999, help="EMA decay for token difficulty stats; higher = longer memory")
+    parser.add_argument("--val-split", default="validation", help="Dataset split for validation; override if your dataset has no 'validation' split")
+    parser.add_argument("--val-batches", type=int, default=16)
+    parser.add_argument("--val-seed", type=int, default=1234)
     parser.add_argument("--lr", type=float, default=None, help="Default: auto-scaled from --hidden-size")
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", default=None, help="Path to a checkpoint to resume training from")
@@ -48,6 +52,10 @@ def main():
         warmup_steps=args.warmup_steps,
         save_every_epochs=args.save_every_epochs,
         difficulty_loss_scale=args.difficulty_loss_scale,
+        difficulty_decay=args.difficulty_decay,
+        val_split=args.val_split,
+        val_batches=args.val_batches,
+        val_seed=args.val_seed,
         lr=args.lr,
     )
     if args.device:
@@ -62,6 +70,7 @@ def main():
         config.pad_token_id,
         config.steps,
         config.device,
+        decay=config.difficulty_decay,
     )
     train(model, diffusion, dataloader, config, resume_path=args.resume)
 

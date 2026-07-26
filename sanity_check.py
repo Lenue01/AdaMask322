@@ -39,6 +39,10 @@ def parse_args():
     parser.add_argument("--save-every-epochs", type=int, default=1)
     parser.add_argument("--max-workers", type=int, default=2)
     parser.add_argument("--difficulty-loss-scale", type=float, default=0.3, help="Loss weight = 1 + scale * difficulty for hard tokens")
+    parser.add_argument("--difficulty-decay", type=float, default=0.999, help="EMA decay for token difficulty stats; higher = longer memory")
+    parser.add_argument("--val-split", default="validation")
+    parser.add_argument("--val-batches", type=int, default=16)
+    parser.add_argument("--val-seed", type=int, default=1234)
     parser.add_argument("--lr", type=float, default=None, help="Default: auto-scaled from --hidden-size")
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", default=None, help="Path to a checkpoint to resume training from")
@@ -63,6 +67,10 @@ def main():
         save_every_epochs=args.save_every_epochs,
         max_workers=args.max_workers,
         difficulty_loss_scale=args.difficulty_loss_scale,
+        difficulty_decay=args.difficulty_decay,
+        val_split=args.val_split,
+        val_batches=args.val_batches,
+        val_seed=args.val_seed,
         lr=args.lr,
     )
     if args.device:
@@ -71,13 +79,14 @@ def main():
     dataloader = get_dataloader(config)
     model = MaskedDiffusionTransformer(config).to(config.device)
     diffusion = TokenDifficulty(
-        config.vocab_size, config.mask_token_id, config.pad_token_id, config.steps, config.device
+        config.vocab_size, config.mask_token_id, config.pad_token_id, config.steps, config.device,
+        decay=config.difficulty_decay,
     )
 
     train(model, diffusion, dataloader, config, resume_path=args.resume)
 
     print("\n=== Sanity check samples ===")
-    tokens = sample(model, config, num_samples=4, temperature=0.9)
+    tokens = sample(model, diffusion, config, num_samples=4, temperature=0.9)
     for i, row in enumerate(tokens.tolist()):
         text = config.tokenizer.decode(row, skip_special_tokens=False)
         print(f"--- sample {i} ---")

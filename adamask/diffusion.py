@@ -24,10 +24,14 @@ class MaskedDiffusion:
         """Return the fraction of tokens to mask at timestep t."""
         return 1.0 - self.alpha[t]
 
-    def corrupt(self, tokens, t):
-        """Corrupt input tokens by replacing some positions with the mask token."""
+    def corrupt(self, tokens, t, generator=None):
+        """Corrupt input tokens by replacing some positions with the mask token.
+
+        Pass a seeded `generator` to get a reproducible corruption pattern (used
+        for validation, so the same inputs are compared across epochs).
+        """
         rate = self.mask_rate(t).view(-1, 1)
-        noise = torch.rand(tokens.shape, device=tokens.device)
+        noise = torch.rand(tokens.shape, device=tokens.device, generator=generator)
         is_masked = (noise < rate) & (tokens != self.pad_token_id)
         x_t = tokens.clone()
         x_t[is_masked] = self.masked_token_id
@@ -37,12 +41,17 @@ class MaskedDiffusion:
 class TokenDifficulty(MaskedDiffusion):
     """Tracks per-token difficulty so the training loss can be weighted toward harder tokens."""
 
-    def __init__(self, vocab_size, masked_token_id, pad_token_id, steps, device):
+    def __init__(self, vocab_size, masked_token_id, pad_token_id, steps, device, decay=0.999):
         super().__init__(steps, masked_token_id, pad_token_id, device)
         # Track how many times each token has been seen in masked positions.
-        self.total = torch.ones(vocab_size, device=device)
-        # Track how often the model predicted each token correctly.
-        self.correct = torch.full((vocab_size,), 0.5, device=device)
+        self.total = torch.zeros(vocab_size, device=device)
+        # Track the running sum of cross-entropy loss for each token when masked.
+        self.loss_sum = torch.zeros(vocab_size, device=device)
+        # Decay applied to both accumulators before each update, turning the
+        # lifetime average into a recency-weighted one (effective window is
+        # roughly 1 / (1 - decay) updates) -- otherwise loss from early training,
+        # when the whole model is bad, permanently biases which tokens look hard.
+        self.decay = decay
 
     def update(self, logits, tokens, is_masked):
         """Update difficulty statistics from the model's masked-token predictions."""
@@ -51,14 +60,18 @@ class TokenDifficulty(MaskedDiffusion):
         if target.numel() == 0:
             return
 
-        # Predicted token IDs for masked positions.
-        predictions = masked_logits.argmax(dim=-1)
-        correct = (predictions == target).to(dtype=torch.float32)
+        # Per-token cross-entropy: higher loss means the token is harder.
+        per_token_loss = F.cross_entropy(masked_logits, target, reduction="none")
 
-        # Increment counters for seen tokens and correct predictions.
+        # Decay existing stats, then accumulate this batch's counts/loss on top.
+        # Dividing two accumulators decayed by the same factor each step is
+        # exactly the recursive form of an EMA, so loss_sum / total is still a
+        # correct (now recency-weighted) mean.
+        self.total *= self.decay
+        self.loss_sum *= self.decay
         self.total.scatter_add_(0, target, torch.ones_like(target, dtype=torch.float32))
-        self.correct.scatter_add_(0, target, correct)
+        self.loss_sum.scatter_add_(0, target, per_token_loss)
 
     def get_difficulty(self, tokens):
-        """Return a difficulty score for each token in the input."""
-        return 1.0 - (self.correct[tokens] / (self.total[tokens] + 1e-8))
+        """Return the mean cross-entropy loss for each token (higher = harder)."""
+        return self.loss_sum[tokens] / (self.total[tokens] + 1e-8)

@@ -41,6 +41,13 @@ class Config:
     total_steps: int = field(init=False)
     max_workers: int = 4
     difficulty_loss_scale: float = 0.3  # weight = 1 + scale * difficulty, per masked token
+    difficulty_decay: float = 0.999  # EMA decay for token difficulty stats; higher = longer memory
+
+    # Validation: a fixed masking seed keeps the corruption pattern identical across
+    # epochs, so changes in val loss reflect the model, not fresh random masking.
+    val_split: str = "validation"
+    val_batches: int = 16
+    val_seed: int = 1234
 
     # Device and tokenizer fields initialized after construction.
     device: torch.device = field(default_factory=lambda: torch.device("cuda" if torch.cuda.is_available() else "cpu"))

@@ -9,13 +9,14 @@ import argparse
 import torch
 
 from adamask.config import Config
+from adamask.diffusion import MaskedDiffusion
 from adamask.model import MaskedDiffusionTransformer
 from adamask.sample import sample
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate text from a trained AdaMask checkpoint")
-    parser.add_argument("checkpoint", help="Path to a .pt state_dict saved during training")
+    parser.add_argument("checkpoint", help="Path to a .pt training checkpoint (as saved by save_checkpoint)")
     parser.add_argument("--model-name", default="roberta-base")
     parser.add_argument("--context-length", type=int, default=128)
     parser.add_argument("--hidden-size", type=int, default=1024)
@@ -42,10 +43,13 @@ def main():
         config.device = torch.device(args.device)
 
     model = MaskedDiffusionTransformer(config).to(config.device)
-    state_dict = torch.load(args.checkpoint, map_location=config.device)
-    model.load_state_dict(state_dict)
+    checkpoint = torch.load(args.checkpoint, map_location=config.device)
+    model.load_state_dict(checkpoint["model"])
 
-    tokens = sample(model, config, num_samples=args.num_samples, temperature=args.temperature)
+    # Only the mask-rate schedule is needed here (no difficulty tracking at
+    # inference time), so a plain MaskedDiffusion is enough.
+    diffusion = MaskedDiffusion(config.steps, config.mask_token_id, config.pad_token_id, config.device)
+    tokens = sample(model, diffusion, config, num_samples=args.num_samples, temperature=args.temperature)
 
     for i, row in enumerate(tokens.tolist()):
         text = config.tokenizer.decode(row, skip_special_tokens=False)
