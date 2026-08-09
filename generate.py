@@ -25,6 +25,8 @@ def parse_args():
     parser.add_argument("--steps", type=int, default=64)
     parser.add_argument("--num-samples", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--remask-threshold", type=float, default=0.2, help="Remask an already-revealed position if the model's confidence in its current token drops below this")
+    parser.add_argument("--max-remask-frac", type=float, default=0.1, help="Max fraction of currently-revealed positions eligible for remasking per step")
     parser.add_argument("--device", default=None)
     return parser.parse_args()
 
@@ -49,7 +51,10 @@ def main():
     # Only the mask-rate schedule is needed here (no difficulty tracking at
     # inference time), so a plain MaskedDiffusion is enough.
     diffusion = MaskedDiffusion(config.steps, config.mask_token_id, config.pad_token_id, config.device)
-    tokens = sample(model, diffusion, config, num_samples=args.num_samples, temperature=args.temperature)
+    tokens = sample(
+        model, diffusion, config, num_samples=args.num_samples, temperature=args.temperature,
+        remask_threshold=args.remask_threshold, max_remask_frac=args.max_remask_frac,
+    )
 
     for i, row in enumerate(tokens.tolist()):
         text = config.tokenizer.decode(row, skip_special_tokens=False)

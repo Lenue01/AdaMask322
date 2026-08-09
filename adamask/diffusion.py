@@ -61,7 +61,10 @@ class TokenDifficulty(MaskedDiffusion):
             return
 
         # Per-token cross-entropy: higher loss means the token is harder.
-        per_token_loss = F.cross_entropy(masked_logits, target, reduction="none")
+        # logits arrive in whatever dtype the forward pass ran in (fp16 under
+        # AMP), but self.total/self.loss_sum are fp32 accumulators -- cast
+        # here so scatter_add_ below doesn't hit a dtype mismatch.
+        per_token_loss = F.cross_entropy(masked_logits.float(), target, reduction="none")
 
         # Decay existing stats, then accumulate this batch's counts/loss on top.
         # Dividing two accumulators decayed by the same factor each step is

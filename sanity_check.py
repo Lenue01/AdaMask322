@@ -1,14 +1,24 @@
 """Fast end-to-end sanity check for the AdaMask design.
 
-Trains a small model on the small wikitext-2 corpus for a short run, then
+Trains a small model on the TinyStories corpus for a short run, then
 samples from it and prints decoded text. This is meant to answer one
 question quickly (minutes, not hours, on a Colab GPU): does the
 architecture + masking + sampling pipeline actually learn to produce
 plausible English, before committing to the full-scale config in main.py?
 
-With this little data and training time, expect memorized/repeated
-fragments from wikitext-2 rather than novel fluent prose. That is fine -
-the goal here is a pipeline sanity check, not a quality benchmark.
+TinyStories (roneneldan/TinyStories) is used here instead of wikitext-2:
+wikitext's raw text keeps wiki markup artifacts (`= = = Heading = = =`
+section headers, `@-@`-joined punctuation), which is noise a sanity check
+doesn't need. TinyStories is plain, grammatical, simple-vocabulary prose
+generated to be readable by a small model, so learning progress (or its
+absence) is easy to see in the decoded samples. It's also a convenient
+size for this purpose: ~2.1M train rows / ~22k validation rows, small
+enough to stream through quickly without the hours-long download of the
+full-scale run's fineweb-edu sample.
+
+With this little training time, expect simple, sometimes repetitive
+sentences rather than fully coherent stories. That is fine - the goal
+here is a pipeline sanity check, not a quality benchmark.
 """
 
 import argparse
@@ -24,8 +34,8 @@ from adamask.train import train
 
 def parse_args():
     parser = argparse.ArgumentParser(description="AdaMask sanity check (small-scale run)")
-    parser.add_argument("--dataset-name", default="Salesforce/wikitext")
-    parser.add_argument("--dataset-config", default="wikitext-2-raw-v1")
+    parser.add_argument("--dataset-name", default="roneneldan/TinyStories")
+    parser.add_argument("--dataset-config", default="default")
     parser.add_argument("--split", default="train")
     parser.add_argument("--context-length", type=int, default=128)
     parser.add_argument("--hidden-size", type=int, default=256)

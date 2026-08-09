@@ -15,19 +15,6 @@ def get_lr(global_step, warmup_steps, max_lr, min_lr, total_steps):
     return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))
 
 
-def apply_partial_reveal(x_t, tokens, is_masked, reveal_prob=0.5):
-    """Reveal a random subset of masked positions from the original tokens.
-
-    This simulates a partially decoded state during diffusion training.
-    """
-    if not is_masked.any():
-        return x_t, is_masked
-
-    reveal_mask = (torch.rand(tokens.shape, device=tokens.device) < reveal_prob) & is_masked
-    x_t[reveal_mask] = tokens[reveal_mask]
-    return x_t, is_masked & ~reveal_mask
-
-
 def print_token_stats(diffusion, tokenizer, k=10):
     counts = diffusion.total
     mean_ce = diffusion.loss_sum / (counts + 1e-8)
@@ -183,16 +170,21 @@ def train(model, diffusion, dataloader, config, resume_path=None):
                 optimizer.zero_grad(set_to_none=True)
 
             t = torch.randint(1, config.steps + 1, (tokens.size(0),), device=config.device)
+            # Train the loss mask directly off diffusion.corrupt's own is_masked, with
+            # no extra reveal step: sample.py never partially reveals tokens within a
+            # step either, so x_t's visible corruption at timestep t must match
+            # mask_rate(t) exactly here too. A prior version revealed a fixed 50% of
+            # masked positions back to ground truth regardless of t, which halved the
+            # actual corruption the model trained on relative to what it sees during
+            # real sampling at the same t -- a train/inference mismatch that was worst
+            # exactly where it matters most, at high-t (heavily masked) steps.
             x_t, is_masked = diffusion.corrupt(tokens, t)
-
-            # Reveal some masked tokens to simulate a partially decoded sequence state.
-            x_t, train_mask = apply_partial_reveal(x_t, tokens, is_masked, reveal_prob=0.5)
 
             with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model(x_t, t, key_padding_mask=pad_mask)
 
-                # Compute loss only on tokens that are still masked and not padding.
-                loss_mask = (train_mask & ~pad_mask).bool()
+                # Compute loss only on tokens that are masked and not padding.
+                loss_mask = (is_masked & ~pad_mask).bool()
                 if loss_mask.any():
                     target = tokens[loss_mask]
                     # Weight each masked token's loss by how hard it has historically
@@ -225,8 +217,8 @@ def train(model, diffusion, dataloader, config, resume_path=None):
                 scaler.update()
 
             # Update token difficulty stats using the positions the model actually
-            # saw as masked (post partial-reveal), not the pre-reveal mask.
-            diffusion.update(logits.detach(), tokens, train_mask)
+            # trained on this step.
+            diffusion.update(logits.detach(), tokens, is_masked)
 
             if loss is not None:
                 running_loss += loss.item() * config.accum_steps
