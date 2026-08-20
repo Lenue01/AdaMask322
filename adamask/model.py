@@ -96,6 +96,16 @@ class MaskedDiffusionTransformer(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+        # Zero-init each block's adaLN output layer so scale=0 and shift=0 at
+        # step zero: x*(1+0)+0 == x, so every block starts as an identity-ish
+        # residual instead of an arbitrary random perturbation. Standard DiT
+        # initialization -- without it, the generic std=0.02 init above gives
+        # every one of the `layers` stacked blocks its own random nonzero
+        # modulation from step one, compounding into noisy early training.
+        for block in self.blocks:
+            nn.init.zeros_(block.adaLN_modulation[-1].weight)
+            nn.init.zeros_(block.adaLN_modulation[-1].bias)
+
     def forward(self, x_t, t, key_padding_mask=None):
         """Predict token logits for a corrupted sequence at timestep t."""
         # Embed tokens and add positional information.

@@ -5,18 +5,29 @@ import torch.nn.functional as F
 
 
 def sample(model, diffusion, config, num_samples=4, temperature=1.0,
-           remask_threshold=0.2, max_remask_frac=0.1):
+           remask_threshold=0.2, max_remask_frac=0.1,
+           repetition_penalty=0.5, repetition_cap=3):
     """Generate sequences by iteratively unmasking and refining positions.
 
     This starts with all tokens masked, then each step predicts logits for
-    the full sequence and does two things:
+    the full sequence and does three things:
 
-    1. Reveals new tokens for still-masked positions, picking the most
+    1. Discounts each token's logit by how many times it already appears
+       elsewhere in the sequence (capped at `repetition_cap` occurrences, so
+       ordinary words that legitimately repeat a lot in normal text -- the,
+       and, of -- aren't punished into oblivion; only repetition past the
+       cap keeps getting suppressed). Without this, confidence-based reveal
+       always favors repeating whatever's already locally common, since a
+       repeat is definitionally the lowest-entropy guess -- which spirals
+       into runaway loops (the same word revealed dozens of times) that get
+       more confident the longer they run, since remasking below can't
+       catch a high-confidence mistake.
+    2. Reveals new tokens for still-masked positions, picking the most
        confident ones first, down to the mask count `diffusion`'s cosine
        schedule expects at the next timestep (instead of spreading reveals
        evenly over the remaining steps, which would drift from what `t` is
        supposed to mean).
-    2. Remasks already-revealed positions the model is no longer confident
+    3. Remasks already-revealed positions the model is no longer confident
        about -- i.e. its predicted probability for the token currently
        sitting there has dropped below `remask_threshold` -- sending them
        back to MASK so a later step, with more of the sequence filled in
@@ -48,10 +59,25 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
         t_val = max(1, num_steps - step)
         t = torch.full((num_samples,), t_val, device=device, dtype=torch.long)
         logits = model(x, t)
+
+        if repetition_penalty > 0:
+            valid = x != config.mask_token_id
+            token_ids = x.clone()
+            token_ids[~valid] = 0
+            counts = torch.zeros(num_samples, config.vocab_size, device=device)
+            counts.scatter_add_(1, token_ids, valid.float())
+            counts = counts.clamp(max=repetition_cap)
+            logits = logits - repetition_penalty * counts.unsqueeze(1)
+
         step_temp = temperature * (0.5 + 0.5 * t_val / num_steps)
         probs = F.softmax(logits / step_temp, dim=-1)
         pred_tokens = torch.multinomial(probs.view(-1, config.vocab_size), 1).view(num_samples, L)
-        confidence = probs.max(dim=-1).values
+        # Confidence must reflect the token we're actually about to commit
+        # (the multinomial sample), not the argmax -- at temperature > 0 those
+        # can differ, and ranking reveals by argmax-confidence while writing a
+        # different, lower-probability sampled token defeats the point of
+        # confidence-ordered revealing (commit to unambiguous tokens first).
+        confidence = probs.gather(-1, pred_tokens.unsqueeze(-1)).squeeze(-1)
 
         # Remask already-revealed positions the model no longer endorses.
         # Skipped on the final step (t_val == 1) so every position is still

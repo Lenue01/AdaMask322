@@ -42,7 +42,15 @@ def print_token_stats(diffusion, tokenizer, k=10):
         print(f"    {tok!r:20s}  ce={ce:.3f}  count={int(cnt)}")
 
 
-def save_checkpoint(model, optimizer, scaler, diffusion, epoch, path):
+# Architecture/schedule fields that a checkpoint must match to load or resume
+# correctly. `steps` in particular changes the mask-rate schedule and the
+# range of `t` the model was conditioned on, but isn't part of any tensor
+# shape in the state_dict -- a mismatch here loads without error and just
+# silently trains or samples against the wrong schedule.
+_ARCH_FIELDS = ["model_name", "context_length", "hidden_size", "heads", "layers", "steps"]
+
+
+def save_checkpoint(model, optimizer, scaler, diffusion, epoch, config, path):
     """Save full training state so a run can be resumed after a crash or disconnect."""
     torch.save({
         "epoch": epoch,
@@ -51,15 +59,32 @@ def save_checkpoint(model, optimizer, scaler, diffusion, epoch, path):
         "scaler": scaler.state_dict(),
         "diffusion_total": diffusion.total,
         "diffusion_loss_sum": diffusion.loss_sum,
+        "config": {field: getattr(config, field) for field in _ARCH_FIELDS},
     }, path)
 
 
-def load_checkpoint(path, model, optimizer, scaler, diffusion, device):
+def load_checkpoint(path, model, optimizer, scaler, diffusion, config):
     """Restore model, optimizer, scaler, and token-difficulty state from a checkpoint.
 
     Returns the epoch to resume from (the one after the last completed epoch).
     """
+    device = config.device
     ckpt = torch.load(path, map_location=device)
+    ckpt_config = ckpt.get("config")
+    if ckpt_config is not None:
+        mismatches = {
+            field: (ckpt_config[field], getattr(config, field))
+            for field in _ARCH_FIELDS
+            if field in ckpt_config and ckpt_config[field] != getattr(config, field)
+        }
+        if mismatches:
+            print(f"WARNING: resume config does not match checkpoint {path}:")
+            for field, (ckpt_val, cur_val) in mismatches.items():
+                print(f"    {field}: checkpoint={ckpt_val!r}  current={cur_val!r}")
+            print("  Continuing training with the CURRENT config's values above -- "
+                  "if that's not intentional, re-run with flags matching the checkpoint.")
+    else:
+        print(f"NOTE: checkpoint {path} predates config tracking; can't verify it matches the current config.")
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     scaler.load_state_dict(ckpt["scaler"])
@@ -139,7 +164,7 @@ def train(model, diffusion, dataloader, config, resume_path=None):
 
     start_epoch = 0
     if resume_path:
-        start_epoch = load_checkpoint(resume_path, model, optimizer, scaler, diffusion, config.device)
+        start_epoch = load_checkpoint(resume_path, model, optimizer, scaler, diffusion, config)
         print(f"Resumed from {resume_path}, continuing at epoch {start_epoch}")
 
     for epoch in range(start_epoch, config.num_epochs):
@@ -226,7 +251,7 @@ def train(model, diffusion, dataloader, config, resume_path=None):
 
         # Save model and print statistics periodically.
         if epoch % config.save_every_epochs == 0 or epoch == config.num_epochs - 1:
-            save_checkpoint(model, optimizer, scaler, diffusion, epoch, f"masked_diffusion_epoch_{epoch}.pt")
+            save_checkpoint(model, optimizer, scaler, diffusion, epoch, config, f"masked_diffusion_epoch_{epoch}.pt")
             print(f"\n--- Epoch {epoch} Token Difficulty ---")
             print_token_stats(diffusion, config.tokenizer)
 

@@ -1,8 +1,12 @@
 """Generate and decode text samples from a trained AdaMask checkpoint.
 
-The Config passed here must describe the same architecture (hidden_size,
-heads, layers, context_length, steps, model_name) used to produce the
-checkpoint, or state_dict loading will fail with a shape mismatch.
+Checkpoints saved after config tracking was added carry their own
+architecture (hidden_size, heads, layers, context_length, steps, model_name)
+and that's used automatically. Any of the flags below can still override it
+explicitly; for a checkpoint saved before config tracking (no "config" key)
+those flags are the only way to specify the right architecture, and getting
+them wrong will fail with a shape mismatch (or, for --steps specifically,
+load fine but silently sample against the wrong schedule).
 """
 
 import argparse
@@ -13,16 +17,23 @@ from adamask.diffusion import MaskedDiffusion
 from adamask.model import MaskedDiffusionTransformer
 from adamask.sample import sample
 
+_ARCH_FIELDS = ["model_name", "context_length", "hidden_size", "heads", "layers", "steps"]
+# Fallback only for checkpoints saved before config tracking was added.
+_LEGACY_DEFAULTS = {
+    "model_name": "roberta-base", "context_length": 128,
+    "hidden_size": 1024, "heads": 16, "layers": 16, "steps": 64,
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate text from a trained AdaMask checkpoint")
     parser.add_argument("checkpoint", help="Path to a .pt training checkpoint (as saved by save_checkpoint)")
-    parser.add_argument("--model-name", default="roberta-base")
-    parser.add_argument("--context-length", type=int, default=128)
-    parser.add_argument("--hidden-size", type=int, default=1024)
-    parser.add_argument("--heads", type=int, default=16)
-    parser.add_argument("--layers", type=int, default=16)
-    parser.add_argument("--steps", type=int, default=64)
+    parser.add_argument("--model-name", default=None, help="Default: from checkpoint, else roberta-base")
+    parser.add_argument("--context-length", type=int, default=None, help="Default: from checkpoint, else 128")
+    parser.add_argument("--hidden-size", type=int, default=None, help="Default: from checkpoint, else 1024")
+    parser.add_argument("--heads", type=int, default=None, help="Default: from checkpoint, else 16")
+    parser.add_argument("--layers", type=int, default=None, help="Default: from checkpoint, else 16")
+    parser.add_argument("--steps", type=int, default=None, help="Default: from checkpoint, else 64")
     parser.add_argument("--num-samples", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--remask-threshold", type=float, default=0.2, help="Remask an already-revealed position if the model's confidence in its current token drops below this")
@@ -33,19 +44,26 @@ def parse_args():
 
 def main():
     args = parse_args()
-    config = Config(
-        model_name=args.model_name,
-        context_length=args.context_length,
-        hidden_size=args.hidden_size,
-        heads=args.heads,
-        layers=args.layers,
-        steps=args.steps,
-    )
-    if args.device:
-        config.device = torch.device(args.device)
+    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    ckpt_config = checkpoint.get("config")
+    if ckpt_config is None:
+        print(f"NOTE: {args.checkpoint} predates config tracking; using CLI flags / legacy defaults for architecture.")
+
+    resolved = {}
+    for field in _ARCH_FIELDS:
+        cli_val = getattr(args, field)
+        if cli_val is not None:
+            resolved[field] = cli_val
+        elif ckpt_config is not None and field in ckpt_config:
+            resolved[field] = ckpt_config[field]
+        else:
+            resolved[field] = _LEGACY_DEFAULTS[field]
+
+    config = Config(**resolved)
+    config.device = device
 
     model = MaskedDiffusionTransformer(config).to(config.device)
-    checkpoint = torch.load(args.checkpoint, map_location=config.device)
     model.load_state_dict(checkpoint["model"])
 
     # Only the mask-rate schedule is needed here (no difficulty tracking at
