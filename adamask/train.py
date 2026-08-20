@@ -97,10 +97,24 @@ def build_val_batches(config):
     """Cache a fixed set of validation batches once, up front.
 
     Reused unchanged every epoch so validation always sees the same examples.
+    Returns an empty list (disabling validation) if --val-batches is 0, or if
+    config.val_split doesn't exist for this dataset -- not every dataset ships
+    one (e.g. HuggingFaceFW/fineweb-edu's sample-10BT config has only "train"),
+    and that shouldn't crash a run that's otherwise fine without validation.
     """
+    if config.val_batches <= 0:
+        return []
+
     val_config = dataclasses.replace(config, split=config.val_split)
-    val_loader = get_dataloader(val_config)
-    val_iter = iter(val_loader)
+    try:
+        val_loader = get_dataloader(val_config)
+        val_iter = iter(val_loader)
+    except ValueError as e:
+        print(f"WARNING: couldn't load validation split {config.val_split!r} ({e}); "
+              f"continuing without validation. Pass --val-split to point at a split "
+              f"this dataset actually has, or --val-batches 0 to silence this.")
+        return []
+
     batches = []
     for _ in range(config.val_batches):
         try:
