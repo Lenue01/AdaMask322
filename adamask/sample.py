@@ -66,8 +66,16 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
             token_ids[~valid] = 0
             counts = torch.zeros(num_samples, config.vocab_size, device=device)
             counts.scatter_add_(1, token_ids, valid.float())
-            counts = counts.clamp(max=repetition_cap)
-            logits = logits - repetition_penalty * counts.unsqueeze(1)
+            # No penalty for the first `repetition_cap` legitimate occurrences
+            # (so "the"/"and"/"of" aren't punished), then penalty grows without
+            # bound past it -- clamping the penalty itself at the cap (as this
+            # used to do) makes it a fixed, eventually-beatable ceiling: once a
+            # token passes repetition_cap occurrences the penalty stops
+            # increasing no matter how many more times it repeats, so a token
+            # the model is confident enough about can out-bid that fixed
+            # deterrent and spiral into an unbounded repeat loop.
+            excess = (counts - repetition_cap).clamp(min=0)
+            logits = logits - repetition_penalty * excess.unsqueeze(1)
 
         step_temp = temperature * (0.5 + 0.5 * t_val / num_steps)
         probs = F.softmax(logits / step_temp, dim=-1)
