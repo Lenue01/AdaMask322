@@ -7,7 +7,6 @@ This project implements a transformer that predicts masked tokens from partially
 ## Structure
 
 - `main.py` - entrypoint for full-scale training
-- `sanity_check.py` - fast, small-scale end-to-end pipeline check
 - `generate.py` - generate and decode text from a trained checkpoint
 - `adamask/config.py` - model and training configuration
 - `adamask/data.py` - dataset loading and tokenization
@@ -15,6 +14,9 @@ This project implements a transformer that predicts masked tokens from partially
 - `adamask/model.py` - transformer denoiser
 - `adamask/train.py` - training loop and loss computation
 - `adamask/sample.py` - iterative confidence-based sampling with self-revision
+- `experiments/adaptive_loss_ablation/` - self-contained notebook for quick,
+  small-scale runs with editable params, and for comparing the adaptive
+  difficulty-weighted loss against a plain-uniform-loss baseline
 
 ## Getting started
 
@@ -24,12 +26,9 @@ Install required dependencies:
 pip install torch transformers datasets tqdm
 ```
 
-Run the sanity check first (small model, a few minutes on a GPU) to confirm
-the pipeline works before committing to a full-scale run:
-
-```bash
-python sanity_check.py
-```
+Run `experiments/adaptive_loss_ablation/Adaptive_Loss_Ablation.ipynb` first
+(small model, a few minutes on a GPU) to confirm the pipeline works and try
+different datasets/params before committing to a full-scale run.
 
 Run full-scale training:
 
@@ -39,15 +38,15 @@ python main.py
 
 ## Datasets
 
-Two different datasets are used for two different purposes:
+Different datasets are used for different purposes:
 
-- **Sanity check** (`sanity_check.py`) uses [`roneneldan/TinyStories`](https://huggingface.co/datasets/roneneldan/TinyStories),
-  a small (~2.1M train / ~22k validation rows), clean, plain-prose dataset of
-  simple generated stories. It was chosen over `wikitext-2-raw-v1` (the
-  previous default) because wikitext's raw text keeps wiki markup artifacts
-  (`= = = Heading = = =` section headers, `@-@`-joined punctuation) that add
-  noise without adding signal for a quick "does the pipeline learn anything"
-  check.
+- **Quick/small-scale runs** (the notebook) support
+  [`roneneldan/TinyStories`](https://huggingface.co/datasets/roneneldan/TinyStories)
+  (~2.1M train rows, clean plain-prose generated stories -- good signal for a
+  quick "does the pipeline learn anything" check) and
+  [`OpenRL/daily_dialog`](https://huggingface.co/datasets/OpenRL/daily_dialog)
+  (~11k real open-domain conversations -- the actual target: conversational
+  capability, not narrative prose).
 - **Full-scale training** (`main.py`) uses `HuggingFaceFW/fineweb-edu`
   (`sample-10BT`), streamed rather than downloaded up front. This is the
   dataset the architecture is actually meant to learn from at scale.
@@ -60,7 +59,7 @@ Two different datasets are used for two different purposes:
 
 ## How the code works
 
-- `main.py` / `sanity_check.py` build a `Config`, load data, construct the model, and start training.
+- `main.py` builds a `Config`, loads data, constructs the model, and starts training.
 - `adamask/data.py` turns raw text into fixed-length token blocks with padding.
 - `adamask/diffusion.py` defines the masking schedule and an adaptive difficulty tracker.
 - `adamask/model.py` defines a transformer that predicts token logits from masked input plus a timestep embedding.
