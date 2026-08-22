@@ -4,13 +4,60 @@ import torch
 import torch.nn.functional as F
 
 
+def _ngram_block_mask(token_list, revealed, ngram_size, mask_positions):
+    """For each position in mask_positions whose preceding (ngram_size - 1)
+    tokens are all revealed, find which candidate tokens would recreate an
+    n-gram that's already present among the currently-revealed runs.
+
+    Only contiguous revealed runs count as "already present" -- a masked gap
+    breaks a run, since we don't know what goes there yet and shouldn't treat
+    it as matching anything. Positions without a complete revealed prefix are
+    skipped for the same reason: nothing to check against yet.
+
+    Returns {position: set(forbidden_token_ids)}.
+    """
+    if ngram_size < 2:
+        return {}
+    L = len(token_list)
+    seen_ngrams = set()
+    i = 0
+    while i < L:
+        if not revealed[i]:
+            i += 1
+            continue
+        j = i
+        while j < L and revealed[j]:
+            j += 1
+        run = token_list[i:j]
+        for k in range(len(run) - ngram_size + 1):
+            seen_ngrams.add(tuple(run[k:k + ngram_size]))
+        i = j
+
+    if not seen_ngrams:
+        return {}
+
+    bad_next = {}
+    for ngram in seen_ngrams:
+        bad_next.setdefault(ngram[:-1], set()).add(ngram[-1])
+
+    blocked = {}
+    for p in mask_positions:
+        prefix_start = p - (ngram_size - 1)
+        if prefix_start < 0 or not all(revealed[prefix_start:p]):
+            continue
+        forbidden = bad_next.get(tuple(token_list[prefix_start:p]))
+        if forbidden:
+            blocked[p] = forbidden
+    return blocked
+
+
 def sample(model, diffusion, config, num_samples=4, temperature=1.0,
            remask_threshold=0.2, max_remask_frac=0.1,
-           repetition_penalty=0.5, repetition_cap=3):
+           repetition_penalty=0.5, repetition_cap=3, no_repeat_ngram_size=3):
     """Generate sequences by iteratively unmasking and refining positions.
 
     This starts with all tokens masked, then each step predicts logits for
-    the full sequence and does three things:
+    the full sequence and does four things:
 
     1. Discounts each token's logit by how many times it already appears
        elsewhere in the sequence (capped at `repetition_cap` occurrences, so
@@ -22,12 +69,20 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
        into runaway loops (the same word revealed dozens of times) that get
        more confident the longer they run, since remasking below can't
        catch a high-confidence mistake.
-    2. Reveals new tokens for still-masked positions, picking the most
+    2. Hard-blocks any candidate token that would recreate a `no_repeat_ngram_size`
+       n-gram already present in the sequence (the same idea as
+       `no_repeat_ngram_size` in standard text-generation libraries). This is
+       a different failure mode from (1): a short phrase built from ordinary,
+       individually-common words (e.g. "put it in her pocket") can repeat
+       verbatim without any single token in it ever tripping the per-token
+       repetition penalty, since none of those words needs to be locally rare
+       to make the phrase itself feel like a repeat.
+    3. Reveals new tokens for still-masked positions, picking the most
        confident ones first, down to the mask count `diffusion`'s cosine
        schedule expects at the next timestep (instead of spreading reveals
        evenly over the remaining steps, which would drift from what `t` is
        supposed to mean).
-    3. Remasks already-revealed positions the model is no longer confident
+    4. Remasks already-revealed positions the model is no longer confident
        about -- i.e. its predicted probability for the token currently
        sitting there has dropped below `remask_threshold` -- sending them
        back to MASK so a later step, with more of the sequence filled in
@@ -76,6 +131,17 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
             # deterrent and spiral into an unbounded repeat loop.
             excess = (counts - repetition_cap).clamp(min=0)
             logits = logits - repetition_penalty * excess.unsqueeze(1)
+
+        if no_repeat_ngram_size and no_repeat_ngram_size > 0:
+            NEG_INF = -1e9
+            token_lists = x.tolist()
+            revealed_lists = (~mask).tolist()
+            for i in range(num_samples):
+                mask_positions = mask[i].nonzero(as_tuple=True)[0].tolist()
+                blocked = _ngram_block_mask(token_lists[i], revealed_lists[i], no_repeat_ngram_size, mask_positions)
+                for p, forbidden_tokens in blocked.items():
+                    idx = torch.tensor(list(forbidden_tokens), device=device, dtype=torch.long)
+                    logits[i, p, idx] = NEG_INF
 
         step_temp = temperature * (0.5 + 0.5 * t_val / num_steps)
         probs = F.softmax(logits / step_temp, dim=-1)
