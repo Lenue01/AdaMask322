@@ -53,7 +53,8 @@ def _ngram_block_mask(token_list, revealed, ngram_size, mask_positions):
 
 def sample(model, diffusion, config, num_samples=4, temperature=1.0,
            remask_threshold=0.2, max_remask_frac=0.1,
-           repetition_penalty=0.5, repetition_cap=3, no_repeat_ngram_size=3):
+           repetition_penalty=0.5, repetition_cap=3, no_repeat_ngram_size=3,
+           verbose=False):
     """Generate sequences by iteratively unmasking and refining positions.
 
     This starts with all tokens masked, then each step predicts logits for
@@ -100,6 +101,11 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
     the sequence is still guaranteed to end fully unmasked after
     `config.steps` steps: the last step's target mask count is always 0,
     forcing anything still masked to be revealed.
+
+    Pass `verbose=True` to print every sample's sequence after each step,
+    decoded with special tokens shown -- still-masked positions come out as
+    the mask token's own string (e.g. "<mask>"), so revealed vs. unrevealed
+    is visible at a glance without any extra bookkeeping.
     """
     model.eval()
     device = config.device
@@ -200,4 +206,9 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
             chosen = masked_pos[top_local]
             x[i].scatter_(0, chosen, pred_tokens[i].gather(0, chosen))
             mask[i][chosen] = False
+
+        if verbose:
+            for i in range(num_samples):
+                text = config.tokenizer.decode(x[i].tolist(), skip_special_tokens=False)
+                print(f"  step {step + 1}/{num_steps} (t={t_val}) sample {i}: {text}")
     return x
