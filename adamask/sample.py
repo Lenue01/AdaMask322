@@ -54,7 +54,7 @@ def _ngram_block_mask(token_list, revealed, ngram_size, mask_positions):
 def sample(model, diffusion, config, num_samples=4, temperature=1.0,
            remask_threshold=0.2, max_remask_frac=0.1,
            repetition_penalty=0.5, repetition_cap=3, no_repeat_ngram_size=3,
-           verbose=False):
+           verbose=True):
     """Generate sequences by iteratively unmasking and refining positions.
 
     This starts with all tokens masked, then each step predicts logits for
@@ -210,5 +210,5 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
         if verbose:
             for i in range(num_samples):
                 text = config.tokenizer.decode(x[i].tolist(), skip_special_tokens=False)
-                print(f"  step {step + 1}/{num_steps} (t={t_val}) sample {i}: {text}")
+                print(f"  sample {i}: {text}")
     return x
