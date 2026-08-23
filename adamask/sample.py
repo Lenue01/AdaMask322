@@ -105,20 +105,16 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
     Pass `verbose=True` to print every sample's sequence after each step,
     decoded with special tokens shown -- still-masked positions come out as
     the mask token's own string (e.g. "<mask>"), so revealed vs. unrevealed
-    is visible at a glance without any extra bookkeeping. In a Jupyter/Colab
-    notebook this redraws in place each step (via IPython's clear_output)
-    instead of printing a new line per step, so watching it live shows the
-    tokens changing without leaving a long scroll of every past step behind;
-    outside a notebook (e.g. generate.py from the command line) it just
-    prints normally, since there's no cell output to clear.
+    is visible at a glance without any extra bookkeeping. Redraws in place
+    each step using raw ANSI cursor-up + clear-to-end-of-screen codes (move
+    up N lines, where N is how many lines the previous step printed, then
+    clear), instead of printing a new line per step -- this is a lower-level
+    mechanism than IPython's clear_output and works in plain ANSI-capable
+    terminals as well as most notebook output panes, rather than depending
+    on an actual connected Jupyter display session.
     """
     model.eval()
-    _clear_output = None
-    if verbose:
-        try:
-            from IPython.display import clear_output as _clear_output
-        except ImportError:
-            pass
+    verbose_lines_printed = 0
     device = config.device
     L = config.context_length
     x = torch.full((num_samples, L), config.mask_token_id, device=device)
@@ -219,9 +215,10 @@ def sample(model, diffusion, config, num_samples=4, temperature=1.0,
             mask[i][chosen] = False
 
         if verbose:
-            if _clear_output is not None:
-                _clear_output(wait=True)
+            if verbose_lines_printed:
+                print(f"\033[{verbose_lines_printed}A\033[J", end="")
             for i in range(num_samples):
                 text = config.tokenizer.decode(x[i].tolist(), skip_special_tokens=False)
                 print(f"  sample {i}: {text}")
+            verbose_lines_printed = num_samples
     return x
